@@ -1,150 +1,131 @@
 """
-Scraper para Zap Imóveis (zapimoveis.com.br).
+Scraper via API interna do Zap Imóveis.
 
-Uso: coleta anúncios de proprietários diretos (particulares) e imobiliárias.
-Respeita rate limiting e não armazena dados sensíveis além do necessário.
+Usa o mesmo endpoint JSON que o browser chama ao carregar resultados
+(glue-api.zapimoveis.com.br/v2/listings). Sem Playwright, sem renderização HTML.
+Rate limiting de 2-4s entre páginas para não sobrecarregar.
 """
-import re
-import json
 import logging
-from typing import AsyncIterator, Optional
-from playwright.async_api import async_playwright, Page, TimeoutError as PWTimeout
+import re
+from typing import AsyncIterator
 
-from backend.scrapers.base import ImovelData, polite_delay, parse_price, parse_int, parse_float
+import httpx
+
+from backend.scrapers.base import ImovelData, polite_delay, parse_float
 
 logger = logging.getLogger(__name__)
 
-BASE = "https://www.zapimoveis.com.br"
+_BASE_API = "https://glue-api.zapimoveis.com.br/v2/listings"
+_PAGE_SIZE = 24
+
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "pt-BR,pt;q=0.9",
+    "Origin": "https://www.zapimoveis.com.br",
+    "Referer": "https://www.zapimoveis.com.br/",
+    "X-Domain": "www.zapimoveis.com.br",
+}
+
+# Mapeamento de tipo para unitTypes da API
+_UNIT_TYPES = {
+    "apartamentos": "APARTMENT",
+    "casas": "HOME",
+    "terrenos": "LAND",
+    "comercial": "COMMERCIAL_PROPERTY",
+    "studio": "STUDIO",
+    "kitnet": "KITNET",
+    "cobertura": "PENTHOUSE",
+}
 
 
-def _build_search_url(
+def _build_params(
     finalidade: str,
     tipo: str,
     estado: str,
     cidade: str,
     bairros: list[str],
-    pagina: int = 1,
-) -> str:
-    finalidade_slug = "venda" if finalidade == "venda" else "aluguel"
-    cidade_slug = cidade.lower().replace(" ", "-")
-    estado_slug = estado.lower()
-    bairros_slug = ",".join(b.lower().replace(" ", "-") for b in bairros) if bairros else ""
-    path = f"/{finalidade_slug}/{tipo}/{estado_slug}+{cidade_slug}"
-    if bairros_slug:
-        path += f"+{bairros_slug}"
-    return f"{BASE}{path}/?pagina={pagina}"
+    offset: int,
+) -> dict:
+    unit_type = _UNIT_TYPES.get(tipo, "APARTMENT")
+    business = "SALE" if finalidade == "venda" else "RENTAL"
+    params = {
+        "user": "user-type",
+        "portal": "ZAP",
+        "business": business,
+        "listingType": "USED",
+        "addressState": estado.upper(),
+        "addressCity": cidade.replace("-", " ").title(),
+        "unitTypes": unit_type,
+        "size": _PAGE_SIZE,
+        "from": offset,
+        "categoryPage": "1",
+        "__vt": "hl",
+    }
+    if bairros:
+        params["addressNeighborhood"] = ",".join(b.replace("-", " ").title() for b in bairros)
+    return params
 
 
-async def _reveal_phone(page: Page, timeout: int = 5000) -> Optional[str]:
-    """Clica no botão 'Ver telefone' e retorna o número revelado."""
-    try:
-        btn = page.locator("button:has-text('Ver telefone'), button:has-text('ver telefone')")
-        if await btn.count() > 0:
-            await btn.first.click()
-            await page.wait_for_timeout(1500)
-        phone_el = page.locator("[data-testid='owner-phone'], .phone, .js-phone-number, [class*='phone']")
-        if await phone_el.count() > 0:
-            text = await phone_el.first.inner_text()
-            digits = re.sub(r"\D", "", text)
-            if len(digits) >= 10:
-                return digits
-    except PWTimeout:
-        pass
-    except Exception as e:
-        logger.debug("Erro ao revelar telefone: %s", e)
-    return None
+def _parse_listing(raw: dict) -> ImovelData:
+    listing = raw.get("listing", raw)
+    link = raw.get("link", {})
 
-
-async def _parse_listing_page(page: Page, url: str) -> ImovelData:
+    url = "https://www.zapimoveis.com.br" + link.get("href", "")
     data = ImovelData(url=url, fonte="zapimoveis")
 
-    try:
-        # Título
-        el = page.locator("h1")
-        if await el.count() > 0:
-            data.titulo = (await el.first.inner_text()).strip()
+    data.titulo = listing.get("title")
+    data.tipo = (listing.get("unitTypes") or [""])[0].lower().replace("_", " ") or None
+    data.finalidade = "venda" if listing.get("businessType") == "SALE" else "aluguel"
 
-        # Preço
-        preco_el = page.locator("[data-testid='price'], .price__item--main, [class*='price-info']")
-        if await preco_el.count() > 0:
-            data.preco = parse_price(await preco_el.first.inner_text())
+    # Preço
+    pricing = (listing.get("pricingInfos") or [{}])[0]
+    preco_str = pricing.get("price") or pricing.get("yearlyIptu") or ""
+    data.preco = parse_float(preco_str) if preco_str else None
 
-        # Características via JSON-LD ou atributos
-        scripts = await page.locator("script[type='application/ld+json']").all()
-        for s in scripts:
-            try:
-                raw = await s.inner_text()
-                obj = json.loads(raw)
-                if obj.get("@type") in ("Apartment", "House", "RealEstateListing", "Product"):
-                    data.titulo = data.titulo or obj.get("name")
-                    addr = obj.get("address", {})
-                    data.endereco = addr.get("streetAddress")
-                    data.bairro = addr.get("addressLocality") or addr.get("neighborhood")
-                    data.cidade = addr.get("addressRegion") or addr.get("addressLocality")
-            except Exception:
-                pass
+    # Área
+    areas = listing.get("usableAreas") or listing.get("totalAreas") or []
+    data.area = float(areas[0]) if areas else None
 
-        # Área, quartos, banheiros, vagas via ícones/atributos
-        features = page.locator("[data-testid='amenities-item'], li.feature, [class*='amenitie'], [class*='feature']")
-        count = await features.count()
-        for i in range(count):
-            text = (await features.nth(i).inner_text()).lower()
-            if "m²" in text or "m2" in text:
-                data.area = data.area or parse_float(text)
-            elif "quarto" in text or "dorm" in text:
-                data.quartos = data.quartos or parse_int(text)
-            elif "banheiro" in text:
-                data.banheiros = data.banheiros or parse_int(text)
-            elif "vaga" in text or "garagem" in text:
-                data.vagas = data.vagas or parse_int(text)
+    # Quartos/banheiros/vagas
+    bedrooms = listing.get("bedrooms") or []
+    data.quartos = int(bedrooms[0]) if bedrooms else None
+    bathrooms = listing.get("bathrooms") or []
+    data.banheiros = int(bathrooms[0]) if bathrooms else None
+    parking = listing.get("parkingSpaces") or []
+    data.vagas = int(parking[0]) if parking else None
 
-        # Anunciante / proprietário
-        anunc_el = page.locator(
-            "[data-testid='owner-name'], [data-testid='publisher-name'], "
-            ".advertiser-name, [class*='publisher']"
-        )
-        if await anunc_el.count() > 0:
-            data.anunciante = (await anunc_el.first.inner_text()).strip()
+    # Endereço
+    addr = listing.get("address", {})
+    data.bairro = addr.get("neighborhood") or addr.get("zone")
+    data.cidade = addr.get("city")
+    data.estado = addr.get("state")
+    parts = [addr.get("street"), addr.get("streetNumber")]
+    data.endereco = " ".join(p for p in parts if p) or None
 
-        # Detecta se é particular (proprietário)
-        page_text = (await page.content()).lower()
-        data.is_proprietario = any(
-            kw in page_text for kw in ["particular", "proprietário", "dono do imóvel"]
-        )
+    # Anunciante / contato
+    advertiser = listing.get("advertiser", {})
+    data.anunciante = advertiser.get("name")
+    phones = advertiser.get("phones") or {}
+    telefones = phones.get("phone") or phones.get("phones") or []
+    if isinstance(telefones, str):
+        telefones = [telefones]
+    if telefones:
+        data.telefone = re.sub(r"\D", "", str(telefones[0]))
+    whatsapps = phones.get("whatsapp") or []
+    if isinstance(whatsapps, str):
+        whatsapps = [whatsapps]
+    if whatsapps:
+        data.whatsapp = re.sub(r"\D", "", str(whatsapps[0]))
+    data.email = advertiser.get("email")
 
-        # Telefone
-        data.telefone = await _reveal_phone(page)
-
-        # WhatsApp link
-        wa = page.locator("a[href*='wa.me'], a[href*='whatsapp']")
-        if await wa.count() > 0:
-            href = await wa.first.get_attribute("href") or ""
-            m = re.search(r"(\d{10,13})", href)
-            if m:
-                data.whatsapp = m.group(1)
-
-        # Localização do breadcrumb / cabeçalho
-        if not data.bairro:
-            loc_el = page.locator("[data-testid='location'], .address, [class*='address']")
-            if await loc_el.count() > 0:
-                loc_text = (await loc_el.first.inner_text()).strip()
-                parts = [p.strip() for p in loc_text.split(",")]
-                if len(parts) >= 2:
-                    data.bairro = parts[0]
-                    data.cidade = parts[1]
-
-        # Tipo de imóvel via URL
-        for t in ["apartamento", "casa", "terreno", "comercial", "studio", "kitnet", "cobertura"]:
-            if t in url:
-                data.tipo = t
-                break
-
-        # Finalidade via URL
-        data.finalidade = "venda" if "/venda/" in url else "aluguel"
-
-    except Exception as e:
-        data.erros.append(str(e))
-        logger.error("Erro ao parsear %s: %s", url, e)
+    # Proprietário = não é imobiliária
+    advertiser_type = advertiser.get("type") or ""
+    data.is_proprietario = advertiser_type.upper() in ("OWNER", "PARTICULAR", "PERSON")
 
     return data
 
@@ -157,79 +138,46 @@ async def scrape(
     bairros: list[str] | None = None,
     max_paginas: int = 3,
     apenas_proprietarios: bool = False,
-    headless: bool = True,
+    headless: bool = True,  # ignorado — mantido para compatibilidade de assinatura
 ) -> AsyncIterator[ImovelData]:
-    """
-    Coleta anúncios do Zap Imóveis.
-
-    Args:
-        finalidade: "venda" ou "aluguel"
-        tipo: "apartamentos", "casas", "terrenos", etc.
-        estado: sigla ex. "sp", "rj"
-        cidade: nome da cidade ex. "sao-paulo"
-        bairros: lista de bairros (opcional)
-        max_paginas: limite de páginas de resultados
-        apenas_proprietarios: filtra apenas anúncios de particulares
-        headless: False para abrir o browser (debug)
-    """
+    """Coleta anúncios do Zap Imóveis via API JSON interna."""
     bairros = bairros or []
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=headless)
-        ctx = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            locale="pt-BR",
-            viewport={"width": 1280, "height": 800},
-        )
-        ctx.set_default_timeout(30_000)
-
-        for pagina in range(1, max_paginas + 1):
-            list_url = _build_search_url(finalidade, tipo, estado, cidade, bairros, pagina)
-            page = await ctx.new_page()
-            logger.info("Zap: página %d — %s", pagina, list_url)
+    async with httpx.AsyncClient(headers=_HEADERS, timeout=20, follow_redirects=True) as client:
+        for pagina in range(max_paginas):
+            offset = pagina * _PAGE_SIZE
+            params = _build_params(finalidade, tipo, estado, cidade, bairros, offset)
+            logger.info("Zap API: página %d (offset %d)", pagina + 1, offset)
             try:
-                await page.goto(list_url, wait_until="domcontentloaded")
-                await polite_delay(3, 6)
-
-                # Coleta links dos anúncios
-                links = await page.locator(
-                    "a[href*='/imovel/'], a[href*='/apartamento/'], a[href*='/casa/']"
-                ).all()
-                hrefs = []
-                for a in links:
-                    href = await a.get_attribute("href")
-                    if href and "/imovel/" in href:
-                        full = href if href.startswith("http") else BASE + href
-                        if full not in hrefs:
-                            hrefs.append(full)
-
-                logger.info("Zap: %d anúncios encontrados na página %d", len(hrefs), pagina)
-
-                if not hrefs:
-                    await page.close()
-                    break
-
-                for href in hrefs:
-                    detail_page = await ctx.new_page()
-                    try:
-                        await detail_page.goto(href, wait_until="domcontentloaded")
-                        await polite_delay(2, 4)
-                        imovel = await _parse_listing_page(detail_page, href)
-                        if apenas_proprietarios and not imovel.is_proprietario:
-                            continue
-                        yield imovel
-                    except Exception as e:
-                        logger.error("Zap: erro ao acessar %s: %s", href, e)
-                    finally:
-                        await detail_page.close()
-                        await polite_delay(1.5, 3)
-
+                r = await client.get(_BASE_API, params=params)
+                r.raise_for_status()
+                body = r.json()
+            except httpx.HTTPStatusError as e:
+                logger.error("Zap API HTTP %s na página %d: %s", e.response.status_code, pagina + 1, e)
+                break
             except Exception as e:
-                logger.error("Zap: erro na página de lista %s: %s", list_url, e)
-            finally:
-                await page.close()
+                logger.error("Zap API erro na página %d: %s", pagina + 1, e)
+                break
 
-        await browser.close()
+            listings = (
+                body.get("search", {})
+                    .get("result", {})
+                    .get("listings", [])
+            )
+            if not listings:
+                logger.info("Zap API: sem mais resultados na página %d", pagina + 1)
+                break
+
+            logger.info("Zap API: %d anúncios na página %d", len(listings), pagina + 1)
+            for raw in listings:
+                try:
+                    imovel = _parse_listing(raw)
+                    if apenas_proprietarios and not imovel.is_proprietario:
+                        continue
+                    yield imovel
+                except Exception as e:
+                    logger.error("Zap API: erro ao parsear anúncio: %s", e)
+
+            if len(listings) < _PAGE_SIZE:
+                break
+
+            await polite_delay(2.0, 4.0)

@@ -21,16 +21,13 @@ python -m venv .venv
 source .venv/bin/activate  # Linux/Mac
 # .venv\Scripts\activate  # Windows
 
-# 2. Instale dependências
+# 2. Instale dependências (sem navegador — usa API JSON direta)
 pip install -r backend/requirements.txt
 
-# 3. Instale o Playwright (navegador Chromium)
-playwright install chromium
-
-# 4. Configure variáveis (opcional)
+# 3. Configure variáveis (opcional)
 cp .env.example .env
 
-# 5. Inicie o servidor
+# 4. Inicie o servidor
 python run.py
 ```
 
