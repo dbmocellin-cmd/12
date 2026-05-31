@@ -1,76 +1,15 @@
 """
-Scraper via API interna do Viva Real (glue-api.vivareal.com.br/v2/listings).
-
-Proteções implementadas:
-- Rotação de User-Agent a cada requisição
-- Rate limiting: 3-7s entre páginas (24 anúncios cada)
-- Backoff exponencial em erro 429 / 5xx (até 3 tentativas)
-- Cap de requisições por sessão para não sobrecarregar
+Scraper Viva Real — usa Playwright para passar pelo Cloudflare e intercepta
+as respostas JSON da glue-api diretamente (sem parsear HTML).
 """
 import logging
 import re
 from typing import AsyncIterator
 
-import httpx
-
-from backend.scrapers.base import (
-    ImovelData,
-    backoff_delay,
-    parse_float,
-    polite_delay,
-    random_user_agent,
-)
+from backend.scrapers.base import ImovelData, parse_float
+from backend.scrapers.browser import scrape_via_browser
 
 logger = logging.getLogger(__name__)
-
-# Viva Real usa o mesmo backend do Zap (OLX Group) — só o parâmetro portal muda
-_BASE_API = "https://glue-api.zapimoveis.com.br/v2/listings"
-_PAGE_SIZE = 24
-_MAX_REQUESTS_PER_SESSION = 30
-
-_BASE_HEADERS = {
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-    "Origin": "https://www.vivareal.com.br",
-    "Referer": "https://www.vivareal.com.br/",
-    "X-Domain": "www.vivareal.com.br",
-}
-
-_UNIT_TYPES = {
-    "apartamentos": "APARTMENT",
-    "casas": "HOME",
-    "terrenos": "LAND",
-    "comercial": "COMMERCIAL_PROPERTY",
-    "studio": "STUDIO",
-    "kitnet": "KITNET",
-    "cobertura": "PENTHOUSE",
-}
-
-
-def _build_params(
-    finalidade: str,
-    tipo: str,
-    estado: str,
-    cidade: str,
-    bairros: list[str],
-    offset: int,
-) -> dict:
-    params = {
-        "user": "user-type",
-        "portal": "VIVAREAL",
-        "business": "SALE" if finalidade == "venda" else "RENTAL",
-        "listingType": "USED",
-        "addressState": estado.upper(),
-        "addressCity": cidade.replace("-", " ").title(),
-        "unitTypes": _UNIT_TYPES.get(tipo, "APARTMENT"),
-        "size": _PAGE_SIZE,
-        "from": offset,
-        "categoryPage": "1",
-        "__vt": "hl",
-    }
-    if bairros:
-        params["addressNeighborhood"] = ",".join(b.replace("-", " ").title() for b in bairros)
-    return params
 
 
 def _parse_listing(raw: dict) -> ImovelData:
@@ -121,7 +60,6 @@ def _parse_listing(raw: dict) -> ImovelData:
 
     advertiser_type = advertiser.get("type") or ""
     data.is_proprietario = advertiser_type.upper() in ("OWNER", "PARTICULAR", "PERSON")
-
     return data
 
 
@@ -135,70 +73,20 @@ async def scrape(
     apenas_proprietarios: bool = False,
     headless: bool = True,
 ) -> AsyncIterator[ImovelData]:
-    """Coleta anúncios do Viva Real via API JSON interna."""
-    bairros = bairros or []
-    requisicoes = 0
-
-    for pagina in range(max_paginas):
-        if requisicoes >= _MAX_REQUESTS_PER_SESSION:
-            logger.warning("VivaReal: cap de %d requisições atingido.", _MAX_REQUESTS_PER_SESSION)
-            break
-
-        offset = pagina * _PAGE_SIZE
-        params = _build_params(finalidade, tipo, estado, cidade, bairros, offset)
-        headers = {**_BASE_HEADERS, "User-Agent": random_user_agent()}
-
-        tentativa = 0
-        body = None
-        while tentativa < 3:
-            async with httpx.AsyncClient(headers=headers, timeout=20, follow_redirects=True) as client:
-                try:
-                    logger.info("VivaReal: página %d (offset %d, tentativa %d)", pagina + 1, offset, tentativa + 1)
-                    r = await client.get(_BASE_API, params=params)
-                    requisicoes += 1
-
-                    if r.status_code == 429:
-                        logger.warning("VivaReal: 429 — aguardando backoff")
-                        await backoff_delay(tentativa)
-                        tentativa += 1
-                        continue
-
-                    r.raise_for_status()
-                    body = r.json()
-                    break
-
-                except httpx.HTTPStatusError as e:
-                    logger.error("VivaReal: HTTP %s na página %d", e.response.status_code, pagina + 1)
-                    if e.response.status_code >= 500:
-                        tentativa += 1
-                        await backoff_delay(tentativa)
-                        continue
-                    body = None
-                    break
-                except Exception as e:
-                    logger.error("VivaReal: erro de conexão na página %d: %s", pagina + 1, e)
-                    tentativa += 1
-                    await backoff_delay(tentativa)
-
-        if body is None:
-            break
-
-        listings = body.get("search", {}).get("result", {}).get("listings", [])
-        if not listings:
-            logger.info("VivaReal: sem mais resultados na página %d", pagina + 1)
-            break
-
-        logger.info("VivaReal: %d anúncios na página %d", len(listings), pagina + 1)
-        for raw in listings:
-            try:
-                imovel = _parse_listing(raw)
-                if apenas_proprietarios and not imovel.is_proprietario:
-                    continue
-                yield imovel
-            except Exception as e:
-                logger.error("VivaReal: erro ao parsear anúncio: %s", e)
-
-        if len(listings) < _PAGE_SIZE:
-            break
-
-        await polite_delay(3.0, 7.0)
+    async for raw in scrape_via_browser(
+        portal="VIVAREAL",
+        finalidade=finalidade,
+        tipo=tipo,
+        estado=estado,
+        cidade=cidade,
+        bairros=bairros or [],
+        max_paginas=max_paginas,
+        headless=headless,
+    ):
+        try:
+            imovel = _parse_listing(raw)
+            if apenas_proprietarios and not imovel.is_proprietario:
+                continue
+            yield imovel
+        except Exception as e:
+            logger.error("VivaReal: erro ao parsear anúncio: %s", e)
