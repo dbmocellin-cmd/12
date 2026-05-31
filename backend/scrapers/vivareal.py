@@ -23,7 +23,8 @@ from backend.scrapers.base import (
 
 logger = logging.getLogger(__name__)
 
-_BASE_API = "https://glue-api.vivareal.com.br/v2/listings"
+# Viva Real usa o mesmo backend do Zap (OLX Group) — só o parâmetro portal muda
+_BASE_API = "https://glue-api.zapimoveis.com.br/v2/listings"
 _PAGE_SIZE = 24
 _MAX_REQUESTS_PER_SESSION = 30
 
