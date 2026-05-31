@@ -1,9 +1,12 @@
 """
-Scraper via API interna do Zap Imóveis.
+Scraper via API interna do Zap Imóveis (glue-api.zapimoveis.com.br/v2/listings).
 
-Usa o mesmo endpoint JSON que o browser chama ao carregar resultados
-(glue-api.zapimoveis.com.br/v2/listings). Sem Playwright, sem renderização HTML.
-Rate limiting de 2-4s entre páginas para não sobrecarregar.
+Proteções implementadas:
+- Rotação de User-Agent a cada requisição
+- Rate limiting: 3-7s entre páginas (24 anúncios cada)
+- Backoff exponencial em erro 429 / 5xx (até 3 tentativas)
+- Cap de requisições por sessão para não sobrecarregar
+- Dados coletados: apenas o que é exibido publicamente no portal
 """
 import logging
 import re
@@ -11,27 +14,29 @@ from typing import AsyncIterator
 
 import httpx
 
-from backend.scrapers.base import ImovelData, polite_delay, parse_float
+from backend.scrapers.base import (
+    ImovelData,
+    backoff_delay,
+    parse_float,
+    polite_delay,
+    random_user_agent,
+)
 
 logger = logging.getLogger(__name__)
 
 _BASE_API = "https://glue-api.zapimoveis.com.br/v2/listings"
 _PAGE_SIZE = 24
+# Máx. requisições por sessão de coleta — evita bloqueio por volume
+_MAX_REQUESTS_PER_SESSION = 30
 
-_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
+_BASE_HEADERS = {
     "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "pt-BR,pt;q=0.9",
+    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
     "Origin": "https://www.zapimoveis.com.br",
     "Referer": "https://www.zapimoveis.com.br/",
     "X-Domain": "www.zapimoveis.com.br",
 }
 
-# Mapeamento de tipo para unitTypes da API
 _UNIT_TYPES = {
     "apartamentos": "APARTMENT",
     "casas": "HOME",
@@ -51,16 +56,14 @@ def _build_params(
     bairros: list[str],
     offset: int,
 ) -> dict:
-    unit_type = _UNIT_TYPES.get(tipo, "APARTMENT")
-    business = "SALE" if finalidade == "venda" else "RENTAL"
     params = {
         "user": "user-type",
         "portal": "ZAP",
-        "business": business,
+        "business": "SALE" if finalidade == "venda" else "RENTAL",
         "listingType": "USED",
         "addressState": estado.upper(),
         "addressCity": cidade.replace("-", " ").title(),
-        "unitTypes": unit_type,
+        "unitTypes": _UNIT_TYPES.get(tipo, "APARTMENT"),
         "size": _PAGE_SIZE,
         "from": offset,
         "categoryPage": "1",
@@ -74,7 +77,6 @@ def _build_params(
 def _parse_listing(raw: dict) -> ImovelData:
     listing = raw.get("listing", raw)
     link = raw.get("link", {})
-
     url = "https://www.zapimoveis.com.br" + link.get("href", "")
     data = ImovelData(url=url, fonte="zapimoveis")
 
@@ -82,16 +84,13 @@ def _parse_listing(raw: dict) -> ImovelData:
     data.tipo = (listing.get("unitTypes") or [""])[0].lower().replace("_", " ") or None
     data.finalidade = "venda" if listing.get("businessType") == "SALE" else "aluguel"
 
-    # Preço
     pricing = (listing.get("pricingInfos") or [{}])[0]
-    preco_str = pricing.get("price") or pricing.get("yearlyIptu") or ""
+    preco_str = pricing.get("price") or ""
     data.preco = parse_float(preco_str) if preco_str else None
 
-    # Área
     areas = listing.get("usableAreas") or listing.get("totalAreas") or []
     data.area = float(areas[0]) if areas else None
 
-    # Quartos/banheiros/vagas
     bedrooms = listing.get("bedrooms") or []
     data.quartos = int(bedrooms[0]) if bedrooms else None
     bathrooms = listing.get("bathrooms") or []
@@ -99,7 +98,6 @@ def _parse_listing(raw: dict) -> ImovelData:
     parking = listing.get("parkingSpaces") or []
     data.vagas = int(parking[0]) if parking else None
 
-    # Endereço
     addr = listing.get("address", {})
     data.bairro = addr.get("neighborhood") or addr.get("zone")
     data.cidade = addr.get("city")
@@ -107,7 +105,6 @@ def _parse_listing(raw: dict) -> ImovelData:
     parts = [addr.get("street"), addr.get("streetNumber")]
     data.endereco = " ".join(p for p in parts if p) or None
 
-    # Anunciante / contato
     advertiser = listing.get("advertiser", {})
     data.anunciante = advertiser.get("name")
     phones = advertiser.get("phones") or {}
@@ -123,7 +120,6 @@ def _parse_listing(raw: dict) -> ImovelData:
         data.whatsapp = re.sub(r"\D", "", str(whatsapps[0]))
     data.email = advertiser.get("email")
 
-    # Proprietário = não é imobiliária
     advertiser_type = advertiser.get("type") or ""
     data.is_proprietario = advertiser_type.upper() in ("OWNER", "PARTICULAR", "PERSON")
 
@@ -138,46 +134,73 @@ async def scrape(
     bairros: list[str] | None = None,
     max_paginas: int = 3,
     apenas_proprietarios: bool = False,
-    headless: bool = True,  # ignorado — mantido para compatibilidade de assinatura
+    headless: bool = True,
 ) -> AsyncIterator[ImovelData]:
     """Coleta anúncios do Zap Imóveis via API JSON interna."""
     bairros = bairros or []
-    async with httpx.AsyncClient(headers=_HEADERS, timeout=20, follow_redirects=True) as client:
-        for pagina in range(max_paginas):
-            offset = pagina * _PAGE_SIZE
-            params = _build_params(finalidade, tipo, estado, cidade, bairros, offset)
-            logger.info("Zap API: página %d (offset %d)", pagina + 1, offset)
-            try:
-                r = await client.get(_BASE_API, params=params)
-                r.raise_for_status()
-                body = r.json()
-            except httpx.HTTPStatusError as e:
-                logger.error("Zap API HTTP %s na página %d: %s", e.response.status_code, pagina + 1, e)
-                break
-            except Exception as e:
-                logger.error("Zap API erro na página %d: %s", pagina + 1, e)
-                break
+    requisicoes = 0
 
-            listings = (
-                body.get("search", {})
-                    .get("result", {})
-                    .get("listings", [])
-            )
-            if not listings:
-                logger.info("Zap API: sem mais resultados na página %d", pagina + 1)
-                break
+    for pagina in range(max_paginas):
+        if requisicoes >= _MAX_REQUESTS_PER_SESSION:
+            logger.warning("Zap: cap de %d requisições atingido, encerrando.", _MAX_REQUESTS_PER_SESSION)
+            break
 
-            logger.info("Zap API: %d anúncios na página %d", len(listings), pagina + 1)
-            for raw in listings:
+        offset = pagina * _PAGE_SIZE
+        params = _build_params(finalidade, tipo, estado, cidade, bairros, offset)
+        headers = {**_BASE_HEADERS, "User-Agent": random_user_agent()}
+
+        tentativa = 0
+        body = None
+        while tentativa < 3:
+            async with httpx.AsyncClient(headers=headers, timeout=20, follow_redirects=True) as client:
                 try:
-                    imovel = _parse_listing(raw)
-                    if apenas_proprietarios and not imovel.is_proprietario:
+                    logger.info("Zap: página %d (offset %d, tentativa %d)", pagina + 1, offset, tentativa + 1)
+                    r = await client.get(_BASE_API, params=params)
+                    requisicoes += 1
+
+                    if r.status_code == 429:
+                        retry_after = int(r.headers.get("Retry-After", 60))
+                        logger.warning("Zap: 429 — aguardando %ds", retry_after)
+                        await backoff_delay(tentativa)
+                        tentativa += 1
                         continue
-                    yield imovel
+
+                    r.raise_for_status()
+                    body = r.json()
+                    break
+
+                except httpx.HTTPStatusError as e:
+                    logger.error("Zap: HTTP %s na página %d", e.response.status_code, pagina + 1)
+                    if e.response.status_code >= 500:
+                        tentativa += 1
+                        await backoff_delay(tentativa)
+                        continue
+                    body = None
+                    break
                 except Exception as e:
-                    logger.error("Zap API: erro ao parsear anúncio: %s", e)
+                    logger.error("Zap: erro de conexão na página %d: %s", pagina + 1, e)
+                    tentativa += 1
+                    await backoff_delay(tentativa)
 
-            if len(listings) < _PAGE_SIZE:
-                break
+        if body is None:
+            break
 
-            await polite_delay(2.0, 4.0)
+        listings = body.get("search", {}).get("result", {}).get("listings", [])
+        if not listings:
+            logger.info("Zap: sem mais resultados na página %d", pagina + 1)
+            break
+
+        logger.info("Zap: %d anúncios na página %d", len(listings), pagina + 1)
+        for raw in listings:
+            try:
+                imovel = _parse_listing(raw)
+                if apenas_proprietarios and not imovel.is_proprietario:
+                    continue
+                yield imovel
+            except Exception as e:
+                logger.error("Zap: erro ao parsear anúncio: %s", e)
+
+        if len(listings) < _PAGE_SIZE:
+            break
+
+        await polite_delay(3.0, 7.0)

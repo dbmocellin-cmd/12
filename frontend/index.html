@@ -25,12 +25,8 @@
       <span class="font-bold text-lg">Captação de Imóveis</span>
     </div>
     <div class="flex gap-4 text-sm">
-      <button @click="aba='leads'" :class="aba==='leads' ? 'font-bold underline' : 'opacity-75 hover:opacity-100'">
-        Leads
-      </button>
-      <button @click="aba='coletar'" :class="aba==='coletar' ? 'font-bold underline' : 'opacity-75 hover:opacity-100'">
-        Nova Coleta
-      </button>
+      <button @click="aba='leads'" :class="aba==='leads' ? 'font-bold underline' : 'opacity-75 hover:opacity-100'">Leads</button>
+      <button @click="aba='coletar'" :class="aba==='coletar' ? 'font-bold underline' : 'opacity-75 hover:opacity-100'">Nova Coleta</button>
     </div>
   </div>
 </nav>
@@ -49,6 +45,11 @@
     <div class="flex items-center gap-1">
       <span class="text-gray-500">Com telefone:</span>
       <span class="font-semibold text-blue-700" x-text="stats.com_telefone ?? '—'"></span>
+    </div>
+    <div x-show="stats.preco_m2_medio" class="flex items-center gap-1">
+      <span class="text-gray-500">Média R$/m²:</span>
+      <span class="font-semibold text-purple-700"
+        x-text="'R$ ' + (stats.preco_m2_medio ?? 0).toLocaleString('pt-BR', {maximumFractionDigits:0})"></span>
     </div>
     <template x-for="(v, k) in (stats.por_status ?? {})">
       <div class="flex items-center gap-1">
@@ -84,8 +85,7 @@
         </div>
         <div>
           <label class="block text-xs text-gray-500 mb-1">Fonte</label>
-          <select x-model="filtros.fonte" @change="buscarImoveis()"
-            class="w-full border rounded px-2 py-1.5 text-sm">
+          <select x-model="filtros.fonte" @change="buscarImoveis()" class="w-full border rounded px-2 py-1.5 text-sm">
             <option value="">Todas</option>
             <option value="zapimoveis">Zap Imóveis</option>
             <option value="vivareal">Viva Real</option>
@@ -93,8 +93,7 @@
         </div>
         <div>
           <label class="block text-xs text-gray-500 mb-1">Finalidade</label>
-          <select x-model="filtros.finalidade" @change="buscarImoveis()"
-            class="w-full border rounded px-2 py-1.5 text-sm">
+          <select x-model="filtros.finalidade" @change="buscarImoveis()" class="w-full border rounded px-2 py-1.5 text-sm">
             <option value="">Todas</option>
             <option value="venda">Venda</option>
             <option value="aluguel">Aluguel</option>
@@ -102,8 +101,7 @@
         </div>
         <div>
           <label class="block text-xs text-gray-500 mb-1">Status</label>
-          <select x-model="filtros.status" @change="buscarImoveis()"
-            class="w-full border rounded px-2 py-1.5 text-sm">
+          <select x-model="filtros.status" @change="buscarImoveis()" class="w-full border rounded px-2 py-1.5 text-sm">
             <option value="">Todos</option>
             <option value="novo">Novo</option>
             <option value="contatado">Contatado</option>
@@ -114,8 +112,7 @@
         </div>
         <div>
           <label class="block text-xs text-gray-500 mb-1">Quartos mín.</label>
-          <select x-model="filtros.quartos_min" @change="buscarImoveis()"
-            class="w-full border rounded px-2 py-1.5 text-sm">
+          <select x-model="filtros.quartos_min" @change="buscarImoveis()" class="w-full border rounded px-2 py-1.5 text-sm">
             <option value="">—</option>
             <option value="1">1+</option>
             <option value="2">2+</option>
@@ -128,18 +125,25 @@
           <input x-model="filtros.preco_max" @input.debounce.500ms="buscarImoveis()"
             type="number" class="w-full border rounded px-2 py-1.5 text-sm" placeholder="ex: 500000" />
         </div>
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">R$/m² máx</label>
+          <input x-model="filtros.preco_m2_max" @input.debounce.500ms="buscarImoveis()"
+            type="number" class="w-full border rounded px-2 py-1.5 text-sm" placeholder="ex: 8000" />
+        </div>
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">R$/m² mín</label>
+          <input x-model="filtros.preco_m2_min" @input.debounce.500ms="buscarImoveis()"
+            type="number" class="w-full border rounded px-2 py-1.5 text-sm" placeholder="ex: 3000" />
+        </div>
         <div class="flex items-end">
           <label class="flex items-center gap-2 text-sm cursor-pointer">
-            <input type="checkbox" x-model="filtros.apenas_proprietarios" @change="buscarImoveis()"
-              class="rounded" />
+            <input type="checkbox" x-model="filtros.apenas_proprietarios" @change="buscarImoveis()" class="rounded" />
             Só proprietários
           </label>
         </div>
-        <div class="flex items-end gap-2 col-span-2">
+        <div class="flex items-end gap-2">
           <button @click="limparFiltros()" class="btn bg-gray-100 hover:bg-gray-200">Limpar</button>
-          <a :href="csvUrl()" class="btn bg-green-600 text-white hover:bg-green-700" download="imoveis.csv">
-            Exportar CSV
-          </a>
+          <a :href="csvUrl()" class="btn bg-green-600 text-white hover:bg-green-700" download="imoveis.csv">CSV</a>
         </div>
       </div>
     </div>
@@ -153,7 +157,6 @@
       Carregando...
     </div>
 
-    <!-- Lista de imóveis -->
     <div x-show="!carregando">
       <div x-show="imoveis.length === 0" class="text-center py-12 text-gray-400">
         Nenhum imóvel encontrado. Inicie uma coleta na aba "Nova Coleta".
@@ -163,6 +166,7 @@
         <template x-for="im in imoveis" :key="im.id">
           <div class="bg-white rounded-lg shadow hover:shadow-md transition-shadow p-4">
             <div class="flex flex-wrap items-start justify-between gap-3">
+
               <!-- Info principal -->
               <div class="flex-1 min-w-0">
                 <div class="flex items-center gap-2 flex-wrap mb-1">
@@ -179,14 +183,18 @@
                   <span x-show="im.bairro && im.cidade">, </span>
                   <span x-show="im.cidade" x-text="im.cidade"></span>
                 </div>
-                <!-- Características -->
-                <div class="flex gap-4 mt-2 text-sm text-gray-600 flex-wrap">
-                  <span x-show="im.preco" class="font-semibold text-gray-800"
+
+                <!-- Características + preço/m² -->
+                <div class="flex gap-4 mt-2 text-sm flex-wrap items-baseline">
+                  <span x-show="im.preco" class="font-semibold text-gray-900"
                     x-text="'R$ ' + (im.preco ?? 0).toLocaleString('pt-BR')"></span>
-                  <span x-show="im.area" x-text="im.area + ' m²'"></span>
-                  <span x-show="im.quartos" x-text="im.quartos + ' qtos'"></span>
-                  <span x-show="im.banheiros" x-text="im.banheiros + ' ban'"></span>
-                  <span x-show="im.vagas" x-text="im.vagas + ' vagas'"></span>
+                  <span x-show="im.preco_m2"
+                    class="text-xs font-medium bg-purple-50 text-purple-700 px-1.5 py-0.5 rounded"
+                    x-text="'R$ ' + (im.preco_m2 ?? 0).toLocaleString('pt-BR', {maximumFractionDigits:0}) + '/m²'"></span>
+                  <span x-show="im.area" class="text-gray-600" x-text="im.area + ' m²'"></span>
+                  <span x-show="im.quartos" class="text-gray-600" x-text="im.quartos + ' qtos'"></span>
+                  <span x-show="im.banheiros" class="text-gray-600" x-text="im.banheiros + ' ban'"></span>
+                  <span x-show="im.vagas" class="text-gray-600" x-text="im.vagas + ' vagas'"></span>
                 </div>
               </div>
 
@@ -212,30 +220,24 @@
                 </a>
               </div>
 
-              <!-- Ações rápidas -->
+              <!-- Ações -->
               <div class="flex flex-col gap-1">
                 <select @change="atualizarStatus(im, $event.target.value)"
-                  class="border rounded px-2 py-1 text-xs"
-                  :value="im.status">
+                  class="border rounded px-2 py-1 text-xs" :value="im.status">
                   <option value="novo">Novo</option>
                   <option value="contatado">Contatado</option>
                   <option value="negociando">Negociando</option>
                   <option value="captado">Captado</option>
                   <option value="descartado">Descartado</option>
                 </select>
-                <button @click="abrirModal(im)" class="btn bg-gray-100 hover:bg-gray-200 text-xs">
-                  Anotações
-                </button>
-                <button @click="deletarImovel(im)" class="btn text-red-500 hover:bg-red-50 text-xs">
-                  Remover
-                </button>
+                <button @click="abrirModal(im)" class="btn bg-gray-100 hover:bg-gray-200 text-xs">Anotações</button>
+                <button @click="deletarImovel(im)" class="btn text-red-500 hover:bg-red-50 text-xs">Remover</button>
               </div>
             </div>
 
-            <!-- Anotações inline -->
-            <div x-show="im.anotacoes" class="mt-2 text-sm bg-yellow-50 rounded px-3 py-2 text-gray-700 border-l-4 border-yellow-400">
-              <span x-text="im.anotacoes"></span>
-            </div>
+            <div x-show="im.anotacoes"
+              class="mt-2 text-sm bg-yellow-50 rounded px-3 py-2 text-gray-700 border-l-4 border-yellow-400"
+              x-text="im.anotacoes"></div>
           </div>
         </template>
       </div>
@@ -257,7 +259,6 @@
       <h2 class="text-lg font-semibold mb-4">Nova Coleta de Anúncios</h2>
 
       <div class="space-y-4">
-        <!-- Fontes -->
         <div>
           <label class="block text-sm font-medium mb-2">Portais</label>
           <div class="flex gap-4">
@@ -273,7 +274,6 @@
         </div>
 
         <div class="grid grid-cols-2 gap-4">
-          <!-- Finalidade -->
           <div>
             <label class="block text-sm font-medium mb-1">Finalidade</label>
             <select x-model="coleta.finalidade" class="w-full border rounded px-3 py-2 text-sm">
@@ -281,7 +281,6 @@
               <option value="aluguel">Aluguel</option>
             </select>
           </div>
-          <!-- Tipo -->
           <div>
             <label class="block text-sm font-medium mb-1">Tipo de imóvel</label>
             <select x-model="coleta.tipo" class="w-full border rounded px-3 py-2 text-sm">
@@ -293,21 +292,16 @@
               <option value="cobertura">Cobertura</option>
             </select>
           </div>
-          <!-- Estado -->
           <div>
             <label class="block text-sm font-medium mb-1">Estado (sigla)</label>
-            <input x-model="coleta.estado" class="w-full border rounded px-3 py-2 text-sm"
-              placeholder="ex: sp" />
+            <input x-model="coleta.estado" class="w-full border rounded px-3 py-2 text-sm" placeholder="ex: sp" />
           </div>
-          <!-- Cidade -->
           <div>
             <label class="block text-sm font-medium mb-1">Cidade (slug)</label>
-            <input x-model="coleta.cidade" class="w-full border rounded px-3 py-2 text-sm"
-              placeholder="ex: sao-paulo" />
+            <input x-model="coleta.cidade" class="w-full border rounded px-3 py-2 text-sm" placeholder="ex: sao-paulo" />
           </div>
         </div>
 
-        <!-- Bairros -->
         <div>
           <label class="block text-sm font-medium mb-1">Bairros (um por linha)</label>
           <textarea x-model="coleta.bairrosRaw" class="w-full border rounded px-3 py-2 text-sm h-20"
@@ -315,14 +309,13 @@
         </div>
 
         <div class="grid grid-cols-2 gap-4">
-          <!-- Páginas -->
           <div>
             <label class="block text-sm font-medium mb-1">Máx. páginas por portal</label>
-            <input type="number" x-model.number="coleta.max_paginas" min="1" max="20"
+            <input type="number" x-model.number="coleta.max_paginas" min="1" max="30"
               class="w-full border rounded px-3 py-2 text-sm" />
+            <p class="text-xs text-gray-400 mt-1">Cada página = 24 anúncios. Cap: 30 req/sessão por portal.</p>
           </div>
-          <!-- Apenas proprietários -->
-          <div class="flex items-end pb-1">
+          <div class="flex items-center pt-5">
             <label class="flex items-center gap-2 text-sm cursor-pointer">
               <input type="checkbox" x-model="coleta.apenas_proprietarios" class="rounded" />
               Apenas proprietários
@@ -331,14 +324,18 @@
         </div>
 
         <!-- Aviso legal -->
-        <div class="text-xs text-gray-500 bg-blue-50 rounded p-3 border border-blue-200">
-          <strong>Conformidade:</strong> Esta ferramenta coleta dados públicos exibidos nos portais
-          para fins legítimos de captação imobiliária (Art. 10, LGPD). O scraping é feito com
-          rate limiting (2-5s entre requisições). Não revenda os dados coletados. Respeite
-          solicitações de opt-out dos anunciantes.
+        <div class="text-xs text-gray-600 bg-blue-50 rounded p-3 border border-blue-200 space-y-1">
+          <p><strong>Conformidade legal (LGPD + ToS):</strong></p>
+          <ul class="list-disc list-inside space-y-0.5">
+            <li>Dados coletados são <strong>públicos</strong> e exibidos pelos próprios portais a qualquer visitante</li>
+            <li>Base legal: <strong>legítimo interesse</strong> do corretor para fins de prospecção (Art. 10, LGPD)</li>
+            <li>Rate limiting: mín. 3s entre páginas + máx. 30 req/sessão → sem sobrecarga nos servidores</li>
+            <li>Deduplicação por endereço: evita armazenar o mesmo imóvel duas vezes</li>
+            <li>Não revenda os dados coletados — isso configura violação à LGPD</li>
+            <li>Respeite opt-outs: se um anunciante pedir remoção, use o botão "Remover"</li>
+          </ul>
         </div>
 
-        <!-- Botão iniciar -->
         <button @click="iniciarColeta()"
           :disabled="coletaAtiva || coleta.fontes.length === 0"
           class="w-full py-2.5 bg-blue-700 text-white rounded-lg font-medium hover:bg-blue-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
@@ -348,8 +345,7 @@
               <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
               <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
             </svg>
-            Coletando... (<span x-text="taskStatus.novos ?? 0"></span> novos /
-            <span x-text="taskStatus.total ?? 0"></span> processados)
+            Coletando...
           </span>
         </button>
 
@@ -363,15 +359,15 @@
               'text-red-600': taskStatus.status === 'cancelado',
             }" x-text="taskStatus.status"></span>
           </div>
-          <div class="text-gray-600">
-            Processados: <strong x-text="taskStatus.total ?? 0"></strong> |
-            Novos: <strong x-text="taskStatus.novos ?? 0"></strong> |
-            Erros: <strong x-text="taskStatus.erros ?? 0"></strong>
+          <div class="text-gray-600 grid grid-cols-2 gap-x-4 gap-y-0.5">
+            <span>Processados: <strong x-text="taskStatus.total ?? 0"></strong></span>
+            <span>Novos salvo: <strong x-text="taskStatus.novos ?? 0"></strong></span>
+            <span>Dup. URL: <strong x-text="taskStatus.duplicatas_url ?? 0"></strong></span>
+            <span>Dup. endereço: <strong x-text="taskStatus.duplicatas_endereco ?? 0"></strong></span>
+            <span>Erros: <strong x-text="taskStatus.erros ?? 0"></strong></span>
           </div>
           <button x-show="coletaAtiva" @click="cancelarColeta()"
-            class="btn bg-red-100 text-red-700 hover:bg-red-200 mt-1">
-            Cancelar
-          </button>
+            class="btn bg-red-100 text-red-700 hover:bg-red-200 mt-1">Cancelar</button>
         </div>
       </div>
     </div>
@@ -403,7 +399,9 @@ function app() {
     perPage: 50,
     filtros: {
       busca: '', cidade: '', bairro: '', fonte: '', finalidade: '',
-      status: '', quartos_min: '', preco_max: '', apenas_proprietarios: false,
+      status: '', quartos_min: '', preco_max: '',
+      preco_m2_min: '', preco_m2_max: '',
+      apenas_proprietarios: false,
     },
     coleta: {
       fontes: ['zapimoveis', 'vivareal'],
@@ -424,8 +422,7 @@ function app() {
     modalAnotacao: '',
 
     async init() {
-      await this.buscarImoveis();
-      await this.buscarStats();
+      await Promise.all([this.buscarImoveis(), this.buscarStats()]);
     },
 
     async buscarImoveis() {
@@ -439,6 +436,8 @@ function app() {
       if (this.filtros.status) p.set('status', this.filtros.status);
       if (this.filtros.quartos_min) p.set('quartos_min', this.filtros.quartos_min);
       if (this.filtros.preco_max) p.set('preco_max', this.filtros.preco_max);
+      if (this.filtros.preco_m2_min) p.set('preco_m2_min', this.filtros.preco_m2_min);
+      if (this.filtros.preco_m2_max) p.set('preco_m2_max', this.filtros.preco_m2_max);
       if (this.filtros.apenas_proprietarios) p.set('apenas_proprietarios', 'true');
       p.set('page', this.pagina);
       p.set('per_page', this.perPage);
@@ -453,8 +452,12 @@ function app() {
     },
 
     limparFiltros() {
-      this.filtros = { busca: '', cidade: '', bairro: '', fonte: '', finalidade: '',
-        status: '', quartos_min: '', preco_max: '', apenas_proprietarios: false };
+      this.filtros = {
+        busca: '', cidade: '', bairro: '', fonte: '', finalidade: '',
+        status: '', quartos_min: '', preco_max: '',
+        preco_m2_min: '', preco_m2_max: '',
+        apenas_proprietarios: false,
+      };
       this.pagina = 1;
       this.buscarImoveis();
     },
@@ -500,8 +503,7 @@ function app() {
     },
 
     async iniciarColeta() {
-      const bairros = this.coleta.bairrosRaw
-        .split('\n').map(b => b.trim()).filter(Boolean);
+      const bairros = this.coleta.bairrosRaw.split('\n').map(b => b.trim()).filter(Boolean);
       const body = {
         fontes: this.coleta.fontes,
         finalidade: this.coleta.finalidade,
@@ -531,8 +533,7 @@ function app() {
         if (['concluido', 'cancelado'].includes(this.taskStatus.status)) {
           clearInterval(this._pollInterval);
           this.coletaAtiva = false;
-          await this.buscarImoveis();
-          await this.buscarStats();
+          await Promise.all([this.buscarImoveis(), this.buscarStats()]);
         }
       }, 3000);
     },
@@ -554,25 +555,14 @@ function app() {
       return `Olá${im.anunciante ? ', ' + im.anunciante : ''}! Vi seu anúncio${im.titulo ? ' "' + im.titulo + '"' : ''} e tenho interesse em conversar sobre uma proposta de captação exclusiva. Posso te ligar para apresentar nossos serviços?`;
     },
 
-    badgeFonte(fonte) {
-      return fonte === 'zapimoveis'
-        ? 'bg-orange-100 text-orange-800'
-        : 'bg-purple-100 text-purple-800';
+    badgeFonte(f) {
+      return f === 'zapimoveis' ? 'bg-orange-100 text-orange-800' : 'bg-purple-100 text-purple-800';
     },
-
-    labelFonte(fonte) {
-      return fonte === 'zapimoveis' ? 'Zap' : 'Viva Real';
-    },
-
-    badgeStatus(status) {
-      const map = {
-        novo: 'bg-blue-100 text-blue-800',
-        contatado: 'bg-yellow-100 text-yellow-800',
-        negociando: 'bg-orange-100 text-orange-800',
-        captado: 'bg-green-100 text-green-800',
-        descartado: 'bg-gray-100 text-gray-500',
-      };
-      return map[status] || 'bg-gray-100 text-gray-600';
+    labelFonte(f) { return f === 'zapimoveis' ? 'Zap' : 'Viva Real'; },
+    badgeStatus(s) {
+      return { novo:'bg-blue-100 text-blue-800', contatado:'bg-yellow-100 text-yellow-800',
+        negociando:'bg-orange-100 text-orange-800', captado:'bg-green-100 text-green-800',
+        descartado:'bg-gray-100 text-gray-500' }[s] || 'bg-gray-100 text-gray-600';
     },
   };
 }

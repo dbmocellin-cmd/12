@@ -8,7 +8,7 @@ from typing import Literal, Optional
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import or_
@@ -16,11 +16,11 @@ from sqlalchemy.orm import Session
 
 from backend.database import get_db, init_db
 from backend.models import Imovel
+from backend.scrapers.base import calcular_endereco_hash
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-# Controle de tarefas de scraping em andamento
 _running_tasks: dict[str, asyncio.Task] = {}
 _task_status: dict[str, dict] = {}
 
@@ -71,6 +71,7 @@ class ImovelOut(BaseModel):
     finalidade: Optional[str]
     preco: Optional[float]
     area: Optional[float]
+    preco_m2: Optional[float]
     quartos: Optional[int]
     banheiros: Optional[int]
     vagas: Optional[int]
@@ -91,6 +92,42 @@ class ImovelOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+# ─── Helpers ───────────────────────────────────────────────────────────────────
+
+def _calcular_preco_m2(preco: Optional[float], area: Optional[float]) -> Optional[float]:
+    if preco and area and area > 0:
+        return round(preco / area, 2)
+    return None
+
+
+def _imovel_from_data(data) -> Imovel:
+    preco_m2 = _calcular_preco_m2(data.preco, data.area)
+    endereco_hash = calcular_endereco_hash(data.cidade, data.bairro, data.endereco)
+    return Imovel(
+        fonte=data.fonte,
+        url=data.url,
+        titulo=data.titulo,
+        tipo=data.tipo,
+        finalidade=data.finalidade,
+        preco=data.preco,
+        area=data.area,
+        preco_m2=preco_m2,
+        quartos=data.quartos,
+        banheiros=data.banheiros,
+        vagas=data.vagas,
+        endereco=data.endereco,
+        bairro=data.bairro,
+        cidade=data.cidade,
+        estado=data.estado,
+        endereco_hash=endereco_hash,
+        anunciante=data.anunciante,
+        telefone=data.telefone,
+        whatsapp=data.whatsapp,
+        email=data.email,
+        is_proprietario=data.is_proprietario,
+    )
+
+
 # ─── Background scraping ────────────────────────────────────────────────────────
 
 async def _run_scrape(task_id: str, req: ScrapeRequest, db_url: str):
@@ -98,9 +135,16 @@ async def _run_scrape(task_id: str, req: ScrapeRequest, db_url: str):
     from sqlalchemy.orm import sessionmaker
 
     engine = create_engine(db_url, connect_args={"check_same_thread": False})
-    Session = sessionmaker(bind=engine)
+    DBSession = sessionmaker(bind=engine)
 
-    _task_status[task_id] = {"status": "running", "total": 0, "novos": 0, "erros": 0}
+    _task_status[task_id] = {
+        "status": "running",
+        "total": 0,
+        "novos": 0,
+        "duplicatas_url": 0,
+        "duplicatas_endereco": 0,
+        "erros": 0,
+    }
 
     scrapers = []
     if "zapimoveis" in req.fontes:
@@ -122,38 +166,38 @@ async def _run_scrape(task_id: str, req: ScrapeRequest, db_url: str):
                 apenas_proprietarios=req.apenas_proprietarios,
             ):
                 _task_status[task_id]["total"] += 1
-                db = Session()
+                db = DBSession()
                 try:
-                    existing = db.query(Imovel).filter(Imovel.url == imovel_data.url).first()
-                    if not existing:
-                        imovel = Imovel(
-                            fonte=imovel_data.fonte,
-                            url=imovel_data.url,
-                            titulo=imovel_data.titulo,
-                            tipo=imovel_data.tipo,
-                            finalidade=imovel_data.finalidade,
-                            preco=imovel_data.preco,
-                            area=imovel_data.area,
-                            quartos=imovel_data.quartos,
-                            banheiros=imovel_data.banheiros,
-                            vagas=imovel_data.vagas,
-                            endereco=imovel_data.endereco,
-                            bairro=imovel_data.bairro,
-                            cidade=imovel_data.cidade,
-                            estado=imovel_data.estado,
-                            anunciante=imovel_data.anunciante,
-                            telefone=imovel_data.telefone,
-                            whatsapp=imovel_data.whatsapp,
-                            email=imovel_data.email,
-                            is_proprietario=imovel_data.is_proprietario,
+                    # 1. Deduplicação por URL (mesmo anúncio)
+                    if db.query(Imovel).filter(Imovel.url == imovel_data.url).first():
+                        _task_status[task_id]["duplicatas_url"] += 1
+                        continue
+
+                    # 2. Deduplicação por endereço físico (mesmo imóvel, portais diferentes)
+                    endereco_hash = calcular_endereco_hash(
+                        imovel_data.cidade, imovel_data.bairro, imovel_data.endereco
+                    )
+                    if endereco_hash and db.query(Imovel).filter(
+                        Imovel.endereco_hash == endereco_hash
+                    ).first():
+                        _task_status[task_id]["duplicatas_endereco"] += 1
+                        logger.info(
+                            "Duplicata por endereço ignorada: %s (%s)",
+                            imovel_data.endereco,
+                            imovel_data.fonte,
                         )
-                        db.add(imovel)
-                        db.commit()
-                        _task_status[task_id]["novos"] += 1
+                        continue
+
+                    imovel = _imovel_from_data(imovel_data)
+                    db.add(imovel)
+                    db.commit()
+                    _task_status[task_id]["novos"] += 1
+
                     if imovel_data.erros:
                         _task_status[task_id]["erros"] += len(imovel_data.erros)
                 finally:
                     db.close()
+
         except asyncio.CancelledError:
             _task_status[task_id]["status"] = "cancelado"
             return
@@ -169,13 +213,15 @@ async def _run_scrape(task_id: str, req: ScrapeRequest, db_url: str):
 
 @app.post("/api/scrape/iniciar")
 async def iniciar_scrape(req: ScrapeRequest, background_tasks: BackgroundTasks):
-    """Inicia uma tarefa de coleta em background."""
     import uuid
     task_id = str(uuid.uuid4())[:8]
     from backend.database import DATABASE_URL
     task = asyncio.create_task(_run_scrape(task_id, req, DATABASE_URL))
     _running_tasks[task_id] = task
-    _task_status[task_id] = {"status": "iniciando", "total": 0, "novos": 0, "erros": 0}
+    _task_status[task_id] = {
+        "status": "iniciando", "total": 0, "novos": 0,
+        "duplicatas_url": 0, "duplicatas_endereco": 0, "erros": 0,
+    }
     return {"task_id": task_id, "mensagem": "Coleta iniciada em background"}
 
 
@@ -208,6 +254,8 @@ def listar_imoveis(
     apenas_proprietarios: bool = False,
     preco_min: Optional[float] = None,
     preco_max: Optional[float] = None,
+    preco_m2_min: Optional[float] = None,
+    preco_m2_max: Optional[float] = None,
     quartos_min: Optional[int] = None,
     busca: Optional[str] = None,
     page: int = Query(1, ge=1),
@@ -230,38 +278,41 @@ def listar_imoveis(
         q = q.filter(Imovel.preco >= preco_min)
     if preco_max is not None:
         q = q.filter(Imovel.preco <= preco_max)
+    if preco_m2_min is not None:
+        q = q.filter(Imovel.preco_m2 >= preco_m2_min)
+    if preco_m2_max is not None:
+        q = q.filter(Imovel.preco_m2 <= preco_m2_max)
     if quartos_min is not None:
         q = q.filter(Imovel.quartos >= quartos_min)
     if busca:
         like = f"%{busca}%"
-        q = q.filter(
-            or_(
-                Imovel.titulo.ilike(like),
-                Imovel.anunciante.ilike(like),
-                Imovel.endereco.ilike(like),
-                Imovel.bairro.ilike(like),
-            )
-        )
-    total = q.count()
+        q = q.filter(or_(
+            Imovel.titulo.ilike(like),
+            Imovel.anunciante.ilike(like),
+            Imovel.endereco.ilike(like),
+            Imovel.bairro.ilike(like),
+        ))
     items = q.order_by(Imovel.criado_em.desc()).offset((page - 1) * per_page).limit(per_page).all()
     return items
 
 
 @app.get("/api/imoveis/stats")
 def stats(db: Session = Depends(get_db)):
+    from sqlalchemy import func
     total = db.query(Imovel).count()
     proprietarios = db.query(Imovel).filter(Imovel.is_proprietario == True).count()
     com_telefone = db.query(Imovel).filter(Imovel.telefone != None).count()
-    from sqlalchemy import func
     por_status = {
         s: c
         for s, c in db.query(Imovel.status, func.count(Imovel.id)).group_by(Imovel.status).all()
     }
+    preco_m2_medio = db.query(func.avg(Imovel.preco_m2)).filter(Imovel.preco_m2 != None).scalar()
     return {
         "total": total,
         "proprietarios": proprietarios,
         "com_telefone": com_telefone,
         "por_status": por_status,
+        "preco_m2_medio": round(preco_m2_medio, 2) if preco_m2_medio else None,
     }
 
 
@@ -318,24 +369,26 @@ def exportar_csv(
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow([
-        "ID", "Fonte", "Título", "Tipo", "Finalidade", "Preço", "Área",
-        "Quartos", "Banheiros", "Vagas", "Endereço", "Bairro", "Cidade",
+        "ID", "Fonte", "Título", "Tipo", "Finalidade", "Preço (R$)", "Área (m²)",
+        "Preço/m² (R$)", "Quartos", "Banheiros", "Vagas", "Endereço", "Bairro", "Cidade",
         "Anunciante", "Proprietário?", "Telefone", "WhatsApp", "Email",
         "Status", "Anotações", "URL", "Captado em",
     ])
     for i in items:
         writer.writerow([
-            i.id, i.fonte, i.titulo, i.tipo, i.finalidade, i.preco, i.area,
-            i.quartos, i.banheiros, i.vagas, i.endereco, i.bairro, i.cidade,
+            i.id, i.fonte, i.titulo, i.tipo, i.finalidade,
+            i.preco, i.area, i.preco_m2,
+            i.quartos, i.banheiros, i.vagas,
+            i.endereco, i.bairro, i.cidade,
             i.anunciante, "Sim" if i.is_proprietario else "Não",
-            i.telefone, i.whatsapp, i.email, i.status, i.anotacoes, i.url,
-            i.captado_em,
+            i.telefone, i.whatsapp, i.email,
+            i.status, i.anotacoes, i.url, i.captado_em,
         ])
 
     output.seek(0)
     return StreamingResponse(
         iter([output.getvalue()]),
-        media_type="text/csv",
+        media_type="text/csv; charset=utf-8-sig",
         headers={"Content-Disposition": "attachment; filename=imoveis.csv"},
     )
 
