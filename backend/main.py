@@ -252,12 +252,11 @@ def stats(db: Session = Depends(get_db)):
     total = db.query(Imovel).count()
     proprietarios = db.query(Imovel).filter(Imovel.is_proprietario == True).count()
     com_telefone = db.query(Imovel).filter(Imovel.telefone != None).count()
-    por_status = {}
-    for row in db.query(Imovel.status, db.query(Imovel).count().label("n")).group_by(Imovel.status).all():
-        pass
     from sqlalchemy import func
-    for status_val, cnt in db.query(Imovel.status, func.count(Imovel.id)).group_by(Imovel.status).all():
-        por_status[status_val] = cnt
+    por_status = {
+        s: c
+        for s, c in db.query(Imovel.status, func.count(Imovel.id)).group_by(Imovel.status).all()
+    }
     return {
         "total": total,
         "proprietarios": proprietarios,
